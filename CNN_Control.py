@@ -1,6 +1,7 @@
 import sys
 sys.path.append("/Volumes/MyDrive/sharedPythonFiles")
 import numpy as np
+from numpy import linalg as LA
 import AdamOptimizer as ao
 from datetime import datetime
 import pickle
@@ -22,6 +23,7 @@ class Control:
         self.L2Lambda = 0.0
         self.weight_decay=1e-4
         self.loss = []
+        self.runningCost = []
         print (" Created Convolution Class")
         
         self.conv_spec_list = [
@@ -47,6 +49,9 @@ class Control:
             
     def setLearningRate(self, lr):
         self.lr = lr
+        
+    def getCost(self):
+        return self.runningCost
         
 # delete a instantioted class instance.
     def __del__(self):
@@ -368,8 +373,8 @@ class Control:
         if not training or p == 0:
             return x, None
         
-        mask = (np.random.rand(*x.shape) > p).astype(x.dtype)
-        out = x * mask / (1 - p)
+        mask = (np.random.rand(*x.shape) > p).astype(x.dtype)/(1-p)
+        out = x * mask
         cache = (mask, p, training)
         return out, cache
 
@@ -436,6 +441,7 @@ class Control:
 
         # Conv backward
         dx_conv_input, conv_grads = self.conv_stack_backward(cur, conv_caches, conv_spec_list)
+        # make sure this called for conv 
         grads.update(conv_grads)
 
         return grads
@@ -514,7 +520,11 @@ class Control:
         flattened = C_last * H_last * W_last
 
         if "W_dense_1" not in params:
-            params["W_dense_1"] = np.random.randn(flattened, dense_channels[0]) * wscale
+            
+            standardD = np.sqrt(2.0/( dense_channels[0]))        
+            params[f"W_dense_1"] = np.random.normal(0.0, standardD,(flattened, dense_channels[0]))
+            # 12/20/2025
+            #params["W_dense_1"] = np.random.randn(flattened, dense_channels[0]) * wscale
             params["b_dense_1"] = np.zeros(dense_channels[0])
 
         return params
@@ -674,11 +684,6 @@ class Control:
                 scores, cache = self.cnn_forward(X_batch, params, self.conv_spec_list, self.dense_channels, inTraining)  
                 # dscores is the gradien wrt to the probabilities???
                 loss, dscores, probs =  self.softmax_loss(scores, y_batch)
-                
-                if b%50 == 0:
-                    loss = loss + self.l2_loss(params, self.weight_decay)
-                    self.loss.append(loss)
-
         
                 # store the results of this batch
                 self.Y_batch_results[start:end, :] = probs
@@ -688,14 +693,17 @@ class Control:
                     self.l2_grad(grads, params, self.weight_decay)
                      # Update
                     params = self.optimizer.step(grads)
+                    if b == num_batches -1 and epoch == epochs - 1:
+                        self.optimizer.printFrobeniusNorm(grads)
                     
             acc = self.accuracy(self.Y_batch_results)
             cost = self.computeMultipleCost()
             if inTraining == True:
-                print ("Accuracy was " + str( acc) + " with cost " + str (cost))
-                #print (" At time ", datetime.now().time())
+                print ("Accuracy was " + str( int(acc)) + " with cost " + str (cost))
             else:
-                print ("Test Accuracy was " + str( acc) + " with cost " + str (cost))
+                print ("Test Accuracy was " + str( int(acc)) + " with cost " + str (cost))
+            
+
             
     def test_cnn(self, X, y):
          # scores is the ouput from the final layer.

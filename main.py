@@ -11,23 +11,19 @@ import CNN_Control as cnn
 import cifar as ci
 
 print ("*-------------------------------CNN-CIFAR---------------------------------------------------*/")
-cifarInst = ci.cifar()
-lr = 0.004
+
+lr = 0.0015
 batchSize = 64
-epochs = 5
+epochs = 3 
 dropOutRate = 0.1
+batchList = [[3]]          
+loadParams = True
 
-batchList = [[0]]           
-loadParams = False
-
-testImages, testLabels =cifarInst.getTestBatchForGPT()
-
-# lr is saved with the "save_params_by_name" call 
-
+cifarInst = ci.cifar()
 CNNManager = cnn.Control(batchSize, lr , epochs, dropOutRate)
 
-# save parms after testing each batch
 print (" Start to Train " +  " at " ,datetime.now().time())
+
 for ii in range(len(batchList)):  
     trainingImages, trainingLabels =cifarInst.getBatchDataFromListGPT(batchList[ii])
     CNNManager.setTrainingData(trainingImages, trainingLabels)
@@ -43,12 +39,13 @@ for ii in range(len(batchList)):
     CNNManager.run()
     
 CNNManager.save_params_by_name("model.pkl")
- 
-print (" Start to Test at " ,datetime.now().time())
-CNNManager.setDropout (0.0)
-CNNManager.test(testImages,testLabels)
-CNNManager.setDropout (dropOutRate)
-print (" Finished Testing at " ,datetime.now().time())
-    
+print (" End of Training " +  " at " ,datetime.now().time())
 
-     
+"""""
+runningCost = CNNManager.getCost()
+plt.plot(runningCost)
+plt.xlabel("Iterations")
+plt.ylabel( "Error for all training instances")
+plt.show()
+plt.savefig("runningCost.png")  
+"""""
