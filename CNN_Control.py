@@ -5,8 +5,10 @@ from numpy import linalg as LA
 import AdamOptimizer as ao
 from datetime import datetime
 import pickle
+import math as mth
+
 class Control:
-    def __init__(self, batchSize, lr , epochs, dropOutRate):
+    def __init__(self, batchSize, lr , epochs, dropOutRate, weightDecay, gapInUse):
         
         self.X = 0
         self.Y = 0
@@ -14,235 +16,258 @@ class Control:
         self.lr = lr
         self.epochs = epochs
         
-        self.dropOut = False
-        if dropOutRate > 0.0:
-            self.dropOut = True
         self.dropOutRate = dropOutRate
+        self.dropOutByLayer = [False, False, False]
+        self.denseBatchNormalization = [False, False, False]
         self.Y_batch_results = 0.0
         self.params = {}
-        self.L2Lambda = 0.0
-        self.weight_decay=1e-4
+        self.weight_decay= weightDecay
         self.loss = []
         self.runningCost = []
+        self.augmentation = False
+        self.gapInUse = gapInUse
+
+
         print (" Created Convolution Class")
         
+        # go to this configuration
+        #   32 → 32 → pool
+        #   64 → 64 → pool
+        
         self.conv_spec_list = [
-            {'filter_size': 3, 'in_ch': 3, 'out_ch': 16, 'stride': 1, 'pad': 1, 'use_bn': True,
-            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
-            {'filter_size': 3, 'in_ch': 16, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
-            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
+            {'filter_size': 3, 'in_ch': 3, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
             {'filter_size': 3, 'in_ch': 32, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
+            {'filter_size': 3, 'in_ch': 32, 'out_ch': 64, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
+            {'filter_size': 3, 'in_ch': 64, 'out_ch': 64, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
+            {'filter_size': 3, 'in_ch': 64, 'out_ch': 128, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
+            {'filter_size': 3, 'in_ch': 128, 'out_ch': 128, 'stride': 1, 'pad': 1, 'use_bn': True,
             'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}}
+
         ]
-        self.dense_channels = [128, 64, 10]  
+
+        #self.dense_channels = [256, 10]  
+        # for GAP there is only the "10" layer.
+        self.dense_channels = [10]
         
     def setTrainingData(self, X,Y):
         self.X = X
         self.Y = Y
         self.Y_batch_results = np.zeros(Y.shape)
-        
 
-    def setDropout(self, dropOutRate):
-        self.dropOut = False
-        if dropOutRate > 0.0:
-            self.dropOut = True
+    def setAugmentation(self, augmentation):
+        self.augmentation = augmentation
             
     def setLearningRate(self, lr):
         self.lr = lr
         
     def getCost(self):
         return self.runningCost
+    
+    def setDenseBatchNorm(self, status):
+        self.denseBatchNormalization = status
+        
+    def setDropout(self, rate, layers):
+        self.dropOutByLayer = layers
+        self.dropOutRate = rate
+        
+    def setEpoch(self,currentEpoch):
+        self.epoch = currentEpoch
+        
+    def cosineDecay(self, maxLr, minLr, totalCount):
+        self.maxLr = maxLr
+        self.minLr = minLr
+        self.totalEpochs = totalCount
+
         
 # delete a instantioted class instance.
     def __del__(self):
         print ("f{self.name} destroyed")     
-    
+
+
+    def im2col(self, x, HH, WW, stride, pad):
+        N, C, H, W = x.shape
+        H_out = (H + 2*pad - HH) // stride + 1
+        W_out = (W + 2*pad - WW) // stride + 1
+
+        x_padded = np.pad(x, ((0,0),(0,0),(pad,pad),(pad,pad)))
+
+        cols = np.zeros((N, C, HH, WW, H_out, W_out))
+
+        for i in range(HH):
+            i_max = i + stride * H_out
+            for j in range(WW):
+                j_max = j + stride * W_out
+                cols[:, :, i, j, :, :] = x_padded[:, :, i:i_max:stride, j:j_max:stride]
+
+        cols = cols.transpose(0,4,5,1,2,3).reshape(N*H_out*W_out, -1)
+        return cols
+
+
     def conv_forward(self, x, w, b, stride=1, pad=1):
         N, C, H, W = x.shape
         F, _, HH, WW = w.shape
 
-        H_out = 1 + (H + 2*pad - HH) // stride
-        W_out = 1 + (W + 2*pad - WW) // stride
+        H_out = (H + 2*pad - HH) // stride + 1
+        W_out = (W + 2*pad - WW) // stride + 1
 
-        x_padded = np.pad(x, ((0,0),(0,0),(pad,pad),(pad,pad)), mode='constant')
-        out = np.zeros((N, F, H_out, W_out))
+        x_cols = self.im2col(x, HH, WW, stride, pad)
+        w_cols = w.reshape(F, -1)
 
-        for n in range(N):
-            for f in range(F):
-                for i in range(0, H_out):
-                    for j in range(0, W_out):
-                        h_start, w_start = i*stride, j*stride
-                        x_slice = x_padded[n, :, h_start:h_start+HH, w_start:w_start+WW]
-                        out[n, f, i, j] = np.sum(x_slice * w[f]) + b[f]
+        out = x_cols @ w_cols.T + b
+        out = out.reshape(N, H_out, W_out, F).transpose(0, 3, 1, 2)
 
-        cache = (x, w, b, stride, pad, x_padded)
+        cache = (x, w, b, stride, pad, x_cols)
         return out, cache
 
- #      backward expectsx, x_hat, mu, var, gamma, beta, eps = cache
  
-    def batchnorm_forward2(self, x, gamma, beta, running_mean, running_var,
-                        momentum=0.9, eps=1e-5, training=True):
-        """
-        x : (N, C, H, W)
-        gamma, beta : (C, 1)
-        running_mean, running_var : (C, 1)
-        """
+    def dense_batchnorm_forward(self, x, gamma, beta, running_mean, running_var,inTraining,
+                        momentum=0.9, eps=1e-5):
+        
+        if inTraining == True:
+            mu = x.mean(axis=0)
+            var = x.var(axis=0)
+            std = np.sqrt(var + eps)
+
+            x_hat = (x - mu) / std
+
+            running_mean[:] = ( momentum * running_mean + (1 - momentum) * mu)
+            running_var[:] = (momentum * running_var + (1 - momentum) * var)
+            #x, x_hat, mu, var, std, gamma = cache
+            cache = (x, x_hat, mu, var, std, gamma)
+
+            #cache = ("dense", x_hat, std, gamma)
+
+        else:
+            x_hat = ((x - running_mean)/ np.sqrt(running_var + eps))
+            cache = None
+
+        out = gamma * x_hat + beta
+
+        return out, cache
+
+    def conv_batchnorm_forward(self, x, gamma, beta,
+                            running_mean, running_var,
+                            inTraining, momentum=0.9, eps=1e-5):
 
         N, C, H, W = x.shape
+        x_flat = x.transpose(1,0,2,3).reshape(C, -1)
 
-        # ---- FLATTEN FOR CHANNEL-WISE BN ----
-        x_flat = x.transpose(1, 0, 2, 3).reshape(C, -1)  # (C, N*H*W)
+        gamma = gamma.reshape(-1,1)
+        beta  = beta.reshape(-1,1)
 
-        # why do I care if I am in training ?
-    
-        mu  = x_flat.mean(axis=1, keepdims=True)      # (C,1)
-        var = x_flat.var(axis=1, keepdims=True)       # (C,1)
+        if inTraining:
+            # 1D for running stats
+            mu_flat  = x_flat.mean(axis=1)        # shape (C,)
+            var_flat = x_flat.var(axis=1)         # shape (C,)
 
-            # Running updates
-        running_mean[:] = momentum * running_mean + (1 - momentum) * mu
-        running_var[:]  = momentum * running_var  + (1 - momentum) * var
-        #else:
-        #    mu = running_mean
-        #    var = running_var
+            running_mean[:] = momentum * running_mean + (1 - momentum) * mu_flat
+            running_var[:]  = momentum * running_var  + (1 - momentum) * var_flat
 
-        std = np.sqrt(var + eps)                           # (C,1)
-        #mean_w = np.mean(W)
-        #std_w = np.std(W)
-        
-        #print(f"mean={mean_w:.4f}, std={std_w:.4f}")
+            # 2D for normalization
+            mu  = mu_flat[:, None]                # (C,1)
+            var = var_flat[:, None]
+        else:
+            mu  = running_mean[:, None]
+            var = running_var[:, None]
 
-        x_hat = (x_flat - mu) / std                        # (C,M)
+        std = np.sqrt(var + eps)
+        x_hat = (x_flat - mu) / std
 
-        # ---- SCALE + SHIFT ----
-        out_flat = gamma * x_hat + beta                    # (C,M)
+        out_flat = gamma * x_hat + beta
+        out = out_flat.reshape(C, N, H, W).transpose(1,0,2,3)
 
-        # ---- RESHAPE BACK ----
-        out = out_flat.reshape(C, N, H, W).transpose(1, 0, 2, 3)
-
-        cache = (x_hat, mu, std, gamma, x_flat)
+        cache = (x_hat, std, gamma)
         return out, cache
+    
 
-    def batchnorm_backward2(self, dout, cache):
+    def conv_batchnorm_backward(self, dout, cache):
         """
         dout : (N, C, H, W)
         """
 
-        x_hat, mu, std, gamma, x_flat = cache
+        x_hat, std, gamma = cache
         N, C, H, W = dout.shape
 
-        dout_flat = dout.transpose(1, 0, 2, 3).reshape(C, -1)  # (C,M)
-        M = dout_flat.shape[1]
+        # normalize by channel
+        dout_flat = dout.transpose(1, 0, 2, 3).reshape(C, -1)
 
-        # ---- PARAM GRADS ----
-        dbeta = dout_flat.sum(axis=1, keepdims=True)                  # (C,1)
-        dgamma = np.sum(dout_flat * x_hat, axis=1, keepdims=True)      # (C,1)
+        dbeta = dout_flat.sum(axis=1)
+        dgamma = (dout_flat * x_hat).sum(axis=1)
+        dxhat = dout_flat * gamma#[:, None]
+        
+        M = dxhat.shape[1]
 
-        dxhat = dout_flat * gamma                                       # (C,M)
-
-        dvar = np.sum(dxhat * (x_flat - mu) * -0.5 * std**(-3), axis=1, keepdims=True)
-        dmu  = np.sum(dxhat * -1 / std, axis=1, keepdims=True) + \
-            dvar * np.mean(-2 * (x_flat - mu), axis=1, keepdims=True)
-
-        dx = (dxhat / std) + (dvar * 2 * (x_flat - mu) / M) + (dmu / M)
-
+        dx = (
+            (dxhat / std)
+            - (dxhat.sum(axis=1, keepdims=True) / M) / std
+            - (x_hat * (dxhat * x_hat).sum(axis=1, keepdims=True) / M) / std
+        )
         dx = dx.reshape(C, N, H, W).transpose(1, 0, 2, 3)
-
+        
+        """
+        dx2, dgamma2, dbeta2 = self.conv_other_batchnorm_backward(dout, cache)
+        dxDiff = np.sum(np.subtract(dx, dx2))
+        gammaDiff = np.sum(np.subtract(dgamma,dgamma2))
+        betaDiff = np.sum(np.subtract(dbeta, dbeta2))
+        print ( "diifs are ", dxDiff,gammaDiff,betaDiff)
+        """
         return dx, dgamma, dbeta
 
-
-
-    def batchnorm_forward(self, x, gamma, beta, runMean, runVar , inTraining) :
-        N, C, H, W = x.shape
-        x_flat = x.transpose(1,0,2,3).reshape(C, -1)
-        eps=1e-5
-        momentum = 0.9
-        
-        if inTraining == True:
-            mu = np.mean(x_flat, axis=1,  keepdims=True)
-            var = np.var(x_flat, axis=1, keepdims=True)
-            
-            runMean[:] = momentum * runMean + (1 - momentum)*mu
-            runVar[:] = momentum * runVar + (1 - momentum)*var
-        else:
-            mu = runMean
-            var = runVar
-
-        std = np.sqrt(var + eps)
-        x_hat = (x_flat - mu) /std
-        #out_flat = gamma[:, None]*x_hat + beta[:, None] -> None must be removed - done 
-        out_flat = gamma*x_hat + beta
-        out = out_flat.reshape(C, N, H, W).transpose(1,0,2,3) 
-
-        cache = (x, x_hat, mu, var, gamma, beta, eps)
-        return out, cache, runMean,runVar
-
-    def maxpool_forward_faster(x, pool_size=2, stride=2):
-        N, C, H, W = x.shape
-        H_out = (H - pool_size)//stride + 1
-        W_out = (W - pool_size)//stride + 1
-        out = np.zeros((N, C, H_out, W_out))
-        mask = np.zeros_like(x, dtype=bool)
-
-        for i in range(H_out):
-            for j in range(W_out):
-                h_start = i * stride
-                h_end = h_start + pool_size
-                w_start = j * stride
-                w_end = w_start + pool_size
-
-                window = x[:, :, h_start:h_end, w_start:w_end]
-                max_vals = np.max(window, axis=(2,3), keepdims=True)
-                out[:, :, i, j] = max_vals.squeeze()
-                mask[:, :, h_start:h_end, w_start:w_end] = (window == max_vals)
-        cache = (x, pool_size, stride, mask)
-        return out, cache
-
     def maxpool_forward(self, x, pool_size=2, stride=2):
-            N, C, H, W = x.shape
-            H_out = (H - pool_size)//stride + 1
-            W_out = (W - pool_size)//stride + 1
-            out = np.zeros((N, C, H_out, W_out))
-            mask = np.zeros_like(x)
+        N, C, H, W = x.shape
+        H_out = (H - pool_size) // stride + 1
+        W_out = (W - pool_size) // stride + 1
 
-            for n in range(N):
-                for c in range(C):
-                    for i in range(H_out):
-                        for j in range(W_out):
-                            h_start, w_start = i*stride, j*stride
-                            patch = x[n,c,h_start:h_start+pool_size,w_start:w_start+pool_size]
-                            m = np.max(patch)
-                            out[n,c,i,j] = m
-                            mask[n,c,h_start:h_start+pool_size,w_start:w_start+pool_size] = (patch == m)
-            cache = (x, mask, pool_size, stride)
-            return out, cache
-    
+        x_reshaped = x.reshape(
+            N, C,
+            H_out, pool_size,
+            W_out, pool_size
+        )
 
-    def dense_batchnorm_forward(self, x, gamma, beta, eps=1e-5):
-        # x: (N, H)
-        mu = np.mean(x, axis=0)
-        var = np.var(x, axis=0)
+        out = x_reshaped.max(axis=(3,5))
 
-        x_hat = (x - mu) / np.sqrt(var + eps)
-        out = gamma * x_hat + beta
-
-        cache = (x, x_hat, mu, var, gamma, beta, eps)
+        cache = (x, pool_size, stride, x_reshaped)
         return out, cache
- 
-    def dense_batchnorm_backward(self, dout, cache):
-        x, x_hat, mu, var, gamma, beta, eps = cache
-        N, D = x.shape
 
-        dbeta = np.sum(dout, axis=0)
-        dgamma = np.sum(dout * x_hat, axis=0)
+    def dense_batchnorm_backward(self, dout, cache, eps = 1e-5):
+        """
+        Dense-layer BatchNorm backward pass.
 
-        dxhat = dout * gamma
+        Inputs:
+        - dout: (N, D)
+        - cache from forward
+
+        Returns:
+        - dx: (N, D)
+        - dgamma: (D,)
+        - dbeta: (D,)
+        """
+        x, x_hat, mu, var, std, gamma = cache
+        N, D = dout.shape
+
+        # Gradients for scale and shift
+        dbeta = np.sum(dout, axis=0)              # (D,)
+        dgamma = np.sum(dout * x_hat, axis=0)     # (D,)
+
+        dxhat = dout * gamma                      # (N, D)
+
+        # Backprop through normalization
         dvar = np.sum(dxhat * (x - mu) * -0.5 * (var + eps)**(-1.5), axis=0)
-        dmu = np.sum(dxhat * -1 / np.sqrt(var + eps), axis=0) \
-            + dvar * np.mean(-2 * (x - mu), axis=0)
+        dmu = (
+            np.sum(dxhat * -1 / std, axis=0) +
+            dvar * np.mean(-2 * (x - mu), axis=0)
+        )
 
-        dx = dxhat / np.sqrt(var + eps) \
-            + dvar * 2 * (x - mu) / N \
-            + dmu / N
+        dx = (
+            dxhat / std +
+            dvar * 2 * (x - mu) / N +
+            dmu / N
+        )
 
         return dx, dgamma, dbeta
 
@@ -256,79 +281,66 @@ class Control:
         x = cache
         dx = dout * (x > 0)
         return dx
-
     
-    def batchnorm_backward(self,dout, cache):
-            x, x_hat, mu, var, gamma, beta, eps = cache
-            N, C, H, W = x.shape
-            x_flat = x.transpose(1,0,2,3).reshape(C, -1)
-            dout_flat = dout.transpose(1,0,2,3).reshape(C, -1)
-
-            m = dout_flat.shape[1]
-            # dxhat = dout_flat * gamma[:, None]- remove None 
-            dxhat = dout_flat * gamma
-            dvar = np.sum(dxhat * (x_flat - mu) * -0.5 * (var + eps)**(-1.5), axis=1, keepdims=True)
-            dmu = np.sum(dxhat * -1/np.sqrt(var + eps), axis=1, keepdims=True) + dvar * np.mean(-2*(x_flat - mu), axis=1, keepdims=True)
-            dx_flat = dxhat / np.sqrt(var + eps) + dvar * 2*(x_flat - mu)/m + dmu/m
-
-            dx = dx_flat.reshape(C,N,H,W).transpose(1,0,2,3)
-            dgamma = np.sum(dout * x_hat.reshape(C,N,H,W).transpose(1,0,2,3), axis=(0,2,3))
-            dbeta = np.sum(dout, axis=(0,2,3))
-            return dx, dgamma, dbeta
-    
-    def maxpool_backward_faster(dout, cache):
-        x, pool_size, stride, mask = cache
-        N, C, H, W = x.shape
-        H_out, W_out = dout.shape[2:]
-        dx = np.zeros_like(x)
-
-        for i in range(H_out):
-            for j in range(W_out):
-                h_start = i * stride
-                h_end = h_start + pool_size
-                w_start = j * stride
-                w_end = w_start + pool_size
-
-                dx[:, :, h_start:h_end, w_start:w_end] += (
-                    mask[:, :, h_start:h_end, w_start:w_end] *
-                    dout[:, :, i, j][:, :, None, None]
-                )
-        return dx
 
     def maxpool_backward(self, dout, cache):
-        x, mask, pool_size, stride = cache
+        x, pool_size, stride, x_reshaped = cache
         N, C, H, W = x.shape
-        H_out, W_out = dout.shape[2:]
-        dx = np.zeros_like(x)
-        for n in range(N):
-            for c in range(C):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start, w_start = i*stride, j*stride
-                        dx[n,c,h_start:h_start+pool_size,w_start:w_start+pool_size] += dout[n,c,i,j] * mask[n,c,h_start:h_start+pool_size,w_start:w_start+pool_size]
+        H_out, W_out = dout.shape[2], dout.shape[3]
+
+        # Create mask of max locations
+        max_mask = (x_reshaped == x_reshaped.max(axis=(3,5), keepdims=True))
+
+        # Expand dout to match pool window shape
+        dout_expanded = dout[:, :, :, None, :, None]
+
+        # Route gradients
+        dx_reshaped = max_mask * dout_expanded
+
+        # Reshape back to input shape
+        dx = dx_reshaped.reshape(x.shape)
+
         return dx
+    
+    def col2im(self, cols, x_shape, HH, WW, stride, pad):
+        N, C, H, W = x_shape
+        H_out = (H + 2*pad - HH) // stride + 1
+        W_out = (W + 2*pad - WW) // stride + 1
+
+        cols = cols.reshape(N, H_out, W_out, C, HH, WW).transpose(0,3,4,5,1,2)
+        x_padded = np.zeros((N, C, H + 2*pad, W + 2*pad))
+
+        for i in range(HH):
+            i_max = i + stride * H_out
+            for j in range(WW):
+                j_max = j + stride * W_out
+                x_padded[:, :, i:i_max:stride, j:j_max:stride] += cols[:, :, i, j, :, :]
+
+        return x_padded[:, :, pad:pad+H, pad:pad+W]
+
 
     def conv_backward(self, dout, cache):
-            x, w, b, stride, pad, x_padded = cache
-            N, C, H, W = x.shape
-            F, _, HH, WW = w.shape
-            _, _, H_out, W_out = dout.shape
+        x, w, b, stride, pad, x_cols = cache
+        N, C, H, W = x.shape
+        F, _, HH, WW = w.shape
 
-            dx_padded = np.zeros_like(x_padded)
-            dw = np.zeros_like(w)
-            db = np.sum(dout, axis=(0, 2, 3))
+        # db
+        db = np.sum(dout, axis=(0, 2, 3))
 
-            for n in range(N):
-                for f in range(F):
-                    for i in range(H_out):
-                        for j in range(W_out):
-                            h_start, w_start = i*stride, j*stride
-                            dx_padded[n, :, h_start:h_start+HH, w_start:w_start+WW] += w[f] * dout[n, f, i, j]
-                            dw[f] += x_padded[n, :, h_start:h_start+HH, w_start:w_start+WW] * dout[n, f, i, j]
+        # reshape dout
+        dout_cols = dout.transpose(0,2,3,1).reshape(-1, F)
 
-            dx = dx_padded[:, :, pad:-pad, pad:-pad]
-            return dx, dw, db
-    
+        # dw
+        dw = dout_cols.T @ x_cols
+        dw = dw.reshape(w.shape)
+
+        # dx
+        w_cols = w.reshape(F, -1)
+        dx_cols = dout_cols @ w_cols
+        dx = self.col2im(dx_cols, x.shape, HH, WW, stride, pad)
+
+        return dx, dw, db
+
     def computeMultipleCost(self):
         m = self.X.shape[0]
         # known as the cross entropy loss
@@ -366,16 +378,11 @@ class Control:
         return loss, dlogits, probs
 
     
-    def dropout_forward(self, x, p=0.5, training=True):
-        """
-        p: dropout probability (fraction to drop)
-        """
-        if not training or p == 0:
-            return x, None
+    def dropout_forward(self, x, p=0.5):
         
         mask = (np.random.rand(*x.shape) > p).astype(x.dtype)/(1-p)
         out = x * mask
-        cache = (mask, p, training)
+        cache = (mask, p, True)
         return out, cache
 
 
@@ -387,11 +394,8 @@ class Control:
             return dout * mask
         
     # x is (4,128) W is (128,10) b is (10,)
-    def dense_forward(self,x, W, b):
-        #N, C, H, W_ = x.shape
-        #x_perm = x.transpose(0, 2, 3, 1).reshape(-1, C)  # (N*H*W, C)
-        #out = x_perm @ W + b                             # (N*H*W, C_out)
-        #out = out.reshape(N, H, W_, -1).transpose(0, 3, 1, 2)
+    def dense_layer_forward(self,x, W, b):
+    
         scores = x @ W + b  
         cache = (x, W, b)
         return scores, cache
@@ -410,11 +414,13 @@ class Control:
         dense_caches = caches['dense_caches']
         conv_caches = caches['conv_caches']
         N, C, H, W = caches['flatten_shape']
+
         conv_spec_list = caches['conv_spec_list']
+        
 
         # Dense backward
         cur = dscores
-        for idx in range(len(dense_caches)-1, -1, -1):
+        for idx in reversed(range(len(dense_caches))):
             cache_affine, bn_cache, cache_relu, dropout_cache = dense_caches[idx]
         
             # dropout precceds relu
@@ -424,7 +430,7 @@ class Control:
             if cache_relu is not None:
                 cur = self.relu_backward(cur, cache_relu)
                 
-            if bn_cache is not None:
+            if self.denseBatchNormalization[idx] == True:
                 dz, dgamma, dbeta = self.dense_batchnorm_backward(cur, bn_cache)
                 grads[f"gamma_dense_{idx+1}"] = dgamma
                 grads[f"beta_dense_{idx+1}"] = dbeta
@@ -436,9 +442,11 @@ class Control:
             grads[f"b_dense_{idx+1}"] = db
             cur = dx
 
-        # cur now has shape (N, C*H*W); reshape
-        cur = cur.reshape(N, C, H, W)
-
+        if self.gapInUse == True:
+            cur = self.gapBackward(cur, caches['flatten_shape'])
+        else:     
+            cur = cur.reshape(N, C, H, W)
+        
         # Conv backward
         dx_conv_input, conv_grads = self.conv_stack_backward(cur, conv_caches, conv_spec_list)
         # make sure this called for conv 
@@ -477,12 +485,17 @@ class Control:
             # He init could be used, but a small normal init is stable for demos
             standardD = 0.015
             params[f"W_conv_{i}"] = np.random.normal(0.0, standardD, (C_out, C_in, F, F))
-            params[f"b_conv_{i}"] = np.zeros(C_out)
+            #params[f"b_conv_{i}"] = np.zeros((C_out,1))
+            params[f"b_conv_{i}"] = np.zeros((C_out))
             if spec.get('use_bn', False):
-                params[f"gamma_conv_{i}"] = np.ones((C_out,1))
-                params[f"beta_conv_{i}"] = np.zeros((C_out,1))
-                params[f"running_mean_{i}"] =  np.zeros((C_out,1))
-                params[f"running_var_{i}"] =  np.ones((C_out,1))
+                #params[f"gamma_conv_{i}"] = np.ones((C_out,1))
+                #params[f"beta_conv_{i}"] = np.zeros((C_out,1))
+                #params[f"running_mean_{i}"] =  np.zeros((C_out,1))
+                #params[f"running_var_{i}"] =  np.ones((C_out,1))
+                params[f"gamma_conv_{i}"] = np.ones((C_out,))
+                params[f"beta_conv_{i}"] = np.zeros((C_out,))
+                params[f"running_mean_{i}"] =  np.zeros((C_out,))
+                params[f"running_var_{i}"] =  np.ones((C_out,))
                 
 
         # Dense params: only shapes for layers 2.. are inferable now; W_dense_1 will be
@@ -496,9 +509,11 @@ class Control:
         for j in range(len(dense_channels)): 
             params[f"gamma_dense_{j+1}"] = np.ones((dense_channels[j]))
             params[f"beta_dense_{j+1}"] = np.zeros((dense_channels[j]))
+            params[f"running_mean_dense_{j+1}"] = np.zeros((dense_channels[j]))
+            params[f"running_var_dense_{j+1}"] = np.zeros((dense_channels[j]))
             
         return params
-
+    
 
     def init_dense_from_sample(self,params, conv_stack_forward_fn, x_sample, conv_spec_list, dense_channels, wscale):
         
@@ -512,19 +527,20 @@ class Control:
         x_sample: sample input of shape (N, C, H, W)
         
         """
-        # Use the conv_forward helper defined below (conv_stack_forward) to get shape
        
         inTraining = False
         conv_out, _ = conv_stack_forward_fn(x_sample, params, conv_spec_list, inTraining)
-        N, C_last, H_last, W_last = conv_out.shape
-        flattened = C_last * H_last * W_last
+        
+        if self.gapInUse == True:
+            gapOut = self.gapForward(conv_out)
+            flattened = gapOut.shape[1]
+        else:
+            N, C_last, H_last, W_last = conv_out.shape
+            flattened = C_last * H_last * W_last
 
         if "W_dense_1" not in params:
-            
             standardD = np.sqrt(2.0/( dense_channels[0]))        
             params[f"W_dense_1"] = np.random.normal(0.0, standardD,(flattened, dense_channels[0]))
-            # 12/20/2025
-            #params["W_dense_1"] = np.random.randn(flattened, dense_channels[0]) * wscale
             params["b_dense_1"] = np.zeros(dense_channels[0])
 
         return params
@@ -544,9 +560,11 @@ class Control:
             pad = spec.get('pad', 0)
             out_conv, cache_conv = self.conv_forward(cur, W, b, stride, pad)
             
+            status = spec.get('use_bn')
+            
             if spec.get('use_bn', False):
                 
-                out_bn, cache_bn= self.batchnorm_forward2(out_conv, 
+                out_bn, cache_bn= self.conv_batchnorm_forward(out_conv, 
                   params[f"gamma_conv_{i}"],
                   params[f"beta_conv_{i}"] ,                                                    
                   params[f"running_mean_{i}"],
@@ -561,8 +579,11 @@ class Control:
             if spec.get('pool_param', None) is not None:
                 pool_param = spec['pool_param']
                 pool_size = pool_param.get('pool_height')
-                stride  = pool_param.get('stride')
-                out_pool, cache_pool = self.maxpool_forward(out_relu, pool_size, stride)
+                if pool_size != 0:
+                    stride  = pool_param.get('stride')
+                    out_pool, cache_pool = self.maxpool_forward(out_relu, pool_size, stride)
+                else:
+                    out_pool, cache_pool = out_relu, None
             else:
                 out_pool, cache_pool = out_relu, None
 
@@ -571,41 +592,54 @@ class Control:
 
         return cur, conv_caches
 
+   
     def cnn_forward(self,x, params, conv_spec_list, dense_channels, inTraining):
-        """
-        Full forward: conv stack (vectorized over batch) -> flatten -> dense stack
-        Returns scores and a cache dict used by cnn_backward.
-        """
-        caches = {}
+            """
+            Full forward: conv stack (vectorized over batch) -> flatten -> dense stack
+            Returns scores and a cache dict used by cnn_backward.
+            """
+            caches = {}
 
-        # conv stack forward
-        conv_out, conv_caches = self.conv_stack_forward(x, params, conv_spec_list, inTraining)
-        caches['conv_caches'] = conv_caches
+            # conv stack forward
+            conv_out, conv_caches = self.conv_stack_forward(x, params, conv_spec_list, inTraining)
+            caches['conv_caches'] = conv_caches
+            N, C, H, W = conv_out.shape
+            if self.gapInUse == False:
+                flat = conv_out.reshape(N, C * H * W)
+            else:
+                flat = self.gapForward(conv_out)
+                
+            caches['flatten_shape'] = (N, C, H, W)   
+            # dense forward
+            scores, caches = self.cnn_dense_forward(params, conv_spec_list, flat, self.dense_channels, caches, inTraining)
 
-        # flatten
-        N, C, H, W = conv_out.shape
-        flat = conv_out.reshape(N, C * H * W)
-        caches['flatten_shape'] = (N, C, H, W)
-        # dense forward
-        dense_caches = []
+            return scores, caches
+
+    def cnn_dense_forward (self, params, conv_spec_list, flat, dense_channels, caches, inTraining):
         prev = flat
         num_dense = len(dense_channels)
+        dense_caches = []
         
         for i, dch in enumerate(dense_channels, start=1):
-            
+                
             Wd = params[f"W_dense_{i}"]
             bd = params[f"b_dense_{i}"]
             gamma = params[f"gamma_dense_{i}"]
             beta = params[f"beta_dense_{i}"]
-
-            out_affine, cache_affine = self.dense_forward(prev, Wd, bd)
-            if i < num_dense:
-                out_bn, bn_cache = self.dense_batchnorm_forward(out_affine, gamma, beta)
-                out_relu, cache_relu = self.relu_forward(out_bn)
-                # this is broken needs much work
-                if self.dropOut == True: 
-                    # my cache is cache = (mask, p, training)
-                    dropOut, dropout_cache = self.dropout_forward(out_relu, self.dropOutRate, inTraining)
+            runningMean = params[f"running_mean_dense_{i}"]
+            runningVar = params[f"running_var_dense_{i}"]
+            out_affine, cache_affine = self.dense_layer_forward(prev, Wd, bd)
+                
+            if i < num_dense:        
+                if self.denseBatchNormalization[i-1]: 
+                    out_bn, bn_cache = self.dense_batchnorm_forward(out_affine, gamma, beta, runningMean, runningVar, inTraining)
+                    out_relu, cache_relu = self.relu_forward(out_bn)
+                else:   
+                    out_relu, cache_relu = self.relu_forward(out_affine)         
+                    bn_cache = None 
+                
+                if self.dropOutByLayer[i-1] == True : 
+                    dropOut, dropout_cache = self.dropout_forward(out_relu, self.dropOutRate)
                     prev = dropOut
                     dense_caches.append((cache_affine, bn_cache, cache_relu, dropout_cache))
                 else:
@@ -614,12 +648,13 @@ class Control:
             else:
                 dense_caches.append((cache_affine, None, None, None))
                 prev = out_affine
-        # 
+                
         scores = prev
         caches['dense_caches'] = dense_caches
         caches['conv_spec_list'] = conv_spec_list
-
+            
         return scores, caches
+
 
     def conv_stack_backward(self,dout, conv_caches, conv_spec_list):
         """
@@ -642,7 +677,7 @@ class Control:
 
             # bn backward
             if spec.get('use_bn', False):
-                cur_grad, dgamma, dbeta = self.batchnorm_backward2(cur_grad, cache_bn)
+                cur_grad, dgamma, dbeta = self.conv_batchnorm_backward(cur_grad, cache_bn)
                 grads[f"gamma_conv_{i+1}"] = dgamma
                 grads[f"beta_conv_{i+1}"] = dbeta
 
@@ -655,34 +690,28 @@ class Control:
 
         return cur_grad, grads
     
-    def softmax_backward_onehot (self, probs, Y):
-        """
-        Inputs:
-        - probs: softmax output, shape (N, C)
-        - Y: one-hot encoded true labels, shape (N, C)
-
-        Returns:
-        - dZ: gradient of loss wrt logits, shape (N, C)
-        """
-
-        N = probs.shape[0]
-        return (probs - Y) / N
-
     def train_cnn(self, X, y, params, batch_size, epochs, inTraining):
         
         num_samples = X.shape[0]
         num_batches = int(np.ceil(num_samples / batch_size))
+        self.Y_batch_results = np.zeros(y.shape)
 
         for epoch in range(epochs):
-           
+            
+            if epoch > 75:
+                self.lr = 0.0003
+                
             for b in range(num_batches):
                 start = b * batch_size
                 end = start + batch_size
                 X_batch, y_batch = X[start:end], y[start:end]
+                # augment as needed
+                if self.augmentation == True:
+                    X_batch = self.augment_cifar10(X_batch)
 
-                # scores is the ouput from the final layer.
-                scores, cache = self.cnn_forward(X_batch, params, self.conv_spec_list, self.dense_channels, inTraining)  
-                # dscores is the gradien wrt to the probabilities???
+                # scores is the ouput from the final layer. 
+                scores, cache = self.cnn_forward(X_batch, params, self.conv_spec_list, self.dense_channels, inTraining)
+                # dscores is the gradien wrt to the probabilities
                 loss, dscores, probs =  self.softmax_loss(scores, y_batch)
         
                 # store the results of this batch
@@ -690,47 +719,37 @@ class Control:
                 
                 if inTraining == True:
                     grads = self.cnn_backward(dscores, cache)
-                    self.l2_grad(grads, params, self.weight_decay)
-                     # Update
-                    params = self.optimizer.step(grads)
-                    if b == num_batches -1 and epoch == epochs - 1:
-                        self.optimizer.printFrobeniusNorm(grads)
+                    params = self.optimizer.step(self.params, grads)
                     
-            acc = self.accuracy(self.Y_batch_results)
+            self.printMessage("Epoch " + str(epoch) + " finished at ")
+            
             cost = self.computeMultipleCost()
-            if inTraining == True:
-                print ("Accuracy was " + str( int(acc)) + " with cost " + str (cost))
-            else:
-                print ("Test Accuracy was " + str( int(acc)) + " with cost " + str (cost))
+            print ("cost for this run was ", cost)
+            self.runningCost.append(cost)
             
-
-            
-    def test_cnn(self, X, y):
-         # scores is the ouput from the final layer.
-        inTraining = False
-        #scores, cache = self.cnn_forward(X, self.params, self.conv_spec_list, self.dense_channels, inTraining)  
-        self.train_cnn(X, y, self.params, self.batchSize, 1 , inTraining)
         
     def init (self):
         
-        sampleX = self.X[0:10,:,:,:]
+        sampleX = self.X[0:64,:,:,:]
         wscale=1e-2
         self.params = self.init_params(self.conv_spec_list, self.dense_channels)
     
         self.params = self.init_dense_from_sample(self.params, self.conv_stack_forward, sampleX, self.conv_spec_list, self.dense_channels, wscale )
-        self.optimizer = ao.AdamOptimizer(self.params, self.lr, self.weight_decay)
+        self.optimizer = ao.AdamOptimizer(self.lr, self.weight_decay)
 
-    def run(self):
-        
+    def run(self): 
         inTraining = True
         self.train_cnn(self.X, self.Y , self.params, self.batchSize, self.epochs, inTraining)
         
-    def testTraining (self):
-       
+    def testTraining(self):
+        
         inTraining = False
-        epochs = 1 
-        # Critical: do not change the batch size.
-        self.train_cnn(self.X, self.Y , self.params, self.batchSize , epochs,inTraining)
+        self.dropOutByLayer = [False, False, False]
+        self.train_cnn(self.X, self.Y , self.params, self.batchSize , 1 , inTraining)
+        acc = self.accuracy(self.Y_batch_results)
+        cost = self.computeMultipleCost()
+       
+        print ("Training Accuracy was " + str( int(acc)) + " with cost " + str (cost))
 
     def test (self,  Xtest, Ytest):
         
@@ -738,26 +757,21 @@ class Control:
         self.Y = Ytest
         epochs = 1 
         inTraining = False
-        self.dropOut = False
-        self.Y_batch_results = np.zeros(self.Y.shape)
+        self.dropOutByLayer = [False, False, False]
+        self.augmentation = False
         self.train_cnn(self.X, self.Y , self.params, self.batchSize , epochs, inTraining)
+        acc = self.accuracy(self.Y_batch_results)
+        cost = self.computeMultipleCost()
+       
+        print ("Test Accuracy was " + str( int(acc)) + " with cost " + str (cost))
 
     def accuracy(self, scores):
       
         # get the indices of the maximum in each column
         labelIndices = np.argmax(self.Y, axis = 1)
         scoresIndices = np.argmax(scores, axis = 1)
-        
-        # calculate the average where each element indicates 
-        # whether the corresponding elements in labelIndices and myResultIndices are equal
-        count = 0
-        for ii in range(scores.shape[0]):
-            if labelIndices[ii] == scoresIndices[ii]:
-                count+= 1
-        #print (" count was ", count)
         acc = np.mean(labelIndices == scoresIndices)
         return acc*100      
-   
 
     def save_params(self):
     
@@ -786,28 +800,12 @@ class Control:
                 checkpoint = pickle.load(f)
 
             saved_params = checkpoint["params"]
-
-            """
-            # -------- SHAPE VALIDATION --------
-            for k in params_template:
-                if k not in saved_params:
-                    raise ValueError(f"Missing parameter in checkpoint: {k}")
-
-                if params_template[k].shape != saved_params[k].shape:
-                    raise ValueError(
-                        f"Shape mismatch for {k}: "
-                        f"expected {params_template[k].shape}, "
-                        f"got {saved_params[k].shape}"
-                    )
-            """
-            # -------- RESTORE PARAMS --------
             params = saved_params
 
             # -------- RESTORE OPTIMIZER --------
             opt_state = checkpoint["optimizer"]
 
             optimizer = optimizer_class(
-                params,
                 lr=opt_state["lr"],
                 beta1=opt_state["beta1"],
                 beta2=opt_state["beta2"],
@@ -827,8 +825,6 @@ class Control:
             print(f"✅ Checkpoint loaded from: {path}")
 
             return params, optimizer
-
-
 
     def save_checkpoint(self, path, params, optimizer,extra= None):
         """
@@ -860,59 +856,140 @@ class Control:
 
         print(f"✅ Checkpoint saved to: {path}")
 
-    def l2_loss(self,params, weight_decay):
-        """
-        Returns L2 penalty term:
-            0.5 * λ * Σ ||W||^2
-        """
-        l2 = 0.0
-        for name, W in params.items():
-            if name.startswith("W"):          # No L2 on bias terms
-                l2 += np.sum(W * W)
-        return 0.5 * weight_decay * l2
+    def random_horizontal_flip(self,images, p=0.5):
+            """
+            images: (N, C, H, W)
+            """
+            N = images.shape[0]
+            flipped = images.copy()
 
+            for i in range(N):
+                if np.random.rand() < p:
+                    flipped[i] = flipped[i, :, :, ::-1]
 
-    def l2_grad(self, grads, params, weight_decay):
+            return flipped
+
+    def random_crop(self, images, crop_size=32, padding=4):
         """
-        Adds λW to gradients of weights.
-        Mutates grads in-place.
+        images: (N, C, H, W)
         """
-        for name in grads:
-            if name.startswith("W"):
-                grads[name] += weight_decay * params[name]
+        N, C, H, W = images.shape
+        padded = np.pad(
+            images,
+            ((0, 0), (0, 0), (padding, padding), (padding, padding)),
+            mode='constant'
+        )
+
+        cropped = np.zeros((N, C, crop_size, crop_size), dtype=images.dtype)
+
+        for i in range(N):
+            y = np.random.randint(0, H + 2 * padding - crop_size + 1)
+            x = np.random.randint(0, W + 2 * padding - crop_size + 1)
+            cropped[i] = padded[i, :, y:y+crop_size, x:x+crop_size]
+
+        return cropped
+    
+    def cutout_batch(self, x, size=8, p=0.5):
+        """
+        Apply Cutout to a batch of images.
+
+        Inputs:
+        - x: input batch of shape (N, C, H, W)
+        - size: cutout square size
+        - p: probability of applying cutout per image
+
+        Returns:
+        - x_out: augmented batch
+        """
+        N, C, H, W = x.shape
+        x_out = x.copy()
+
+        for i in range(N):
+            if np.random.rand() > p:
+                continue
+
+            y = np.random.randint(0, H)
+            x0 = np.random.randint(0, W)
+
+            y1 = np.clip(y - size // 2, 0, H)
+            y2 = np.clip(y + size // 2, 0, H)
+            x1 = np.clip(x0 - size // 2, 0, W)
+            x2 = np.clip(x0 + size // 2, 0, W)
+
+            x_out[i, :, y1:y2, x1:x2] = 0.0
+
+        return x_out
+    
+    def augment_cifar10(self, images):
+        """
+        images: (N, C, 32, 32)
+        """
+        images = self.random_crop(images, crop_size=32, padding=4)
+        images = self.random_horizontal_flip(images, p=0.5)
+       
+        return images
+
+    def getCosineLr(self, current_step):
+        """
+        Calculates learning rate at a given step using cosine decay.
+        """
+        total_steps = self.totalEpochs
+        lr_max = self.maxLr
+        lr_min = self.minLr
+        # Ensure current_step does not exceed total_steps
+        current_step = min(current_step, total_steps)
         
+        # Cosine decay formula
+        cosine_decay = 0.5 * (1 + mth.cos(mth.pi * current_step / total_steps))
+        # Scale and shift to [lr_min, lr_max]
+        return lr_min + (lr_max - lr_min) * cosine_decay
+    
+        # Example: Get LR for step 50 of 100
+        # current_lr = get_cosine_lr(50, 100, lr_max=0.1, lr_min=0.001)
+        # print(f"Learning Rate at step 50: {current_lr}")    
+        
+    def gapForward(self, x):
+        """
+        Global Average Pooling forward pass.
 
-    """"
-    THis is done for each mini batch - that is for each forward pass
-    The matyrix is stored in the cache so it available for the backward pass
-    During the test run drop[out is not in effect.
-    For dense networks use 0.2 to 0.5 for the drop out rate
+        Inputs:
+        - x: Input data of shape (N, C, H, W)
 
-    	1.	Start modestly:
-         Begin with 0.2 after activation layers. Thus the keep proability is 0.8
-         if r is the dropput rate then p = 1 - r 
-	    2.	Watch validation loss:
-	    •	If validation loss > training loss (overfitting) → increase dropout.
-	    •	If both training and validation loss are high (underfitting) → decrease dropout.
-	    3.	Use different rates for different layers:
-	    •	Early layers (close to input): 0.1–0.2
-	    •	Deeper / dense layers: 0.3–0.5 
+        Returns a tuple of:
+        - out: Output data of shape (N, C)
+        - cache: Cached values for backward pass
+        """
+        N, C, H, W = x.shape
+
+        # Mean over spatial dimensions
+        out = x.mean(axis=(2, 3))
+
+        #cache = (x.shape,)
+        #return out, cache
+        return out
 
     
+    def gapBackward(self, dout, cache):
+        """
+        Global Average Pooling backward pass.
 
-    # Forward
-    Z = W @ X + b
-    Z_norm, cache_bn = batchnorm_forward(Z, gamma, beta)
-    A = relu(Z_norm)
-    D = (np.random.rand(*A.shape) < p).astype(float)
-    A_drop = (A * D) / p
+        Inputs:
+        - dout: Upstream gradients of shape (N, C)
+        - cache: Cached values from forward pass
 
-    # Backward
-    dA = (dA_drop * D) / p
-    dZ_norm = dA * (Z_norm > 0)                 # ReLU backward
-    dZ, dgamma, dbeta = batchnorm_backward(dZ_norm, cache_bn)
-    dW = (dZ @ X.T) / m
-    db = np.mean(dZ, axis=1, keepdims=True)
-    dX = W.T @ dZ
+        Returns:
+        - dx: Gradient with respect to input x, shape (N, C, H, W)
+        """
+       
+        (N, C, H, W,) = cache
+        
+        dx = dout[:, :, None, None] / (H * W)
+        dx = np.broadcast_to(dx, (N, C, H, W))
+
+        return dx
     
-    """
+    def printMessage(self, mess):
+        time =   datetime.now().time()    
+        current = time.replace(microsecond=0)
+        print (mess ,current)
+       

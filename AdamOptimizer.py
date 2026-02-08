@@ -1,7 +1,7 @@
 
 import numpy as np
 import pickle 
-
+from numpy import linalg as LA
 """
 grads = {
         'W_conv': dW_conv,
@@ -25,7 +25,7 @@ params = {
 """
 
 class AdamOptimizer: 
-    def __init__(self, params, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
+    def __init__(self, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
         
         self.lr = lr
         self.beta1 = beta1
@@ -33,35 +33,41 @@ class AdamOptimizer:
         self.eps = eps
         self.weight_decay = weight_decay
         self.t = 0
-        self.m = {k: np.zeros_like(v) for k,v in params.items()}
-        self.v = {k: np.zeros_like(v) for k,v in params.items()}
-       
-        self.params = params
+        self.m = {}
+        self.v = {}
         
-    def step(self, grads):
+  
+    def step(self, params, grads):
         self.t += 1
-        
-        for k in self.params.keys():
-            
+
+        for k in params.keys():
+
             if k not in grads:
                 continue
-            
+
+            if k not in self.m:
+                self.m[k] = np.zeros_like(params[k])
+                self.v[k] = np.zeros_like(params[k])
+
             g = grads[k]
-                 
+
+            # Adam moments
             self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * g
             self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (g ** 2)
-            
-            m_hat = self.m[k] / (1 - self.beta1**self.t)
-            v_hat = self.v[k] / (1 - self.beta2**self.t)
-            self.params[k] -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
-            
-             # This is decouples weight decay
-             
-            if self.weight_decay > 0 and k.startswith('W'):
-                self.params[k] -= self.lr * self.weight_decay * self.params[k]
-            
-        return self.params
- 
+
+            m_hat = self.m[k] / (1 - self.beta1 ** self.t)
+            v_hat = self.v[k] / (1 - self.beta2 ** self.t)
+
+            # AdamW weight decay (decoupled)
+            if 'W' in k:
+                params[k] *= (1 - self.lr * self.weight_decay)
+
+            # Parameter update
+            params[k] -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
+        return params
+
+
    
     def save_state(self, filename="model_optimizer.npz"):
         flat = {
@@ -147,3 +153,17 @@ class AdamOptimizer:
             ex2 += np.sum(value)
         return ex1, ex2
     
+        #   to take the mean gradient per layer I would add the norms for each layer 
+        #   and average (divide by 3 in my case)
+
+    def printFrobeniusNorm(self, grads, params):
+         
+        substrings = ["W_dens"]
+        
+        for k in params.keys():
+            if any(sub in k for sub in substrings):
+                if k in grads:
+                    g = grads[k]
+                    mess = " gradient for " +  str(k) + " is "
+                    print (mess, np.linalg.norm(g)) 
+

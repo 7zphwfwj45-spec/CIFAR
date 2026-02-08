@@ -174,8 +174,9 @@ class cifar:
         images,labels = self.extractDataFromBatch('test_batch')
         images =  np.reshape( images,(10000,32,32,3))
         images = np.transpose (images,(0,3,1,2))
-        #imagesR = np.reshape(images, (-1,3,32,32))
-        images = images.astype(np.float32)/255.0
+        # the two step normalizationn is ok
+        images = images.astype(np.float32)/255
+        images = self.CIFAR_normalize(images)
         indices = np.arange(images.shape[0])
         np.random.shuffle(indices)
         X, y = images[indices], labels[indices]
@@ -188,14 +189,21 @@ class cifar:
         images,labels = self.extractDataFromBatch(batch)
         images =  np.reshape( images,(10000,32,32,3))
         images = np.transpose (images,(0,3,1,2))
-        #imagesR = np.reshape(images, (-1,3,32,32))
+        # the two step normalizationn is ok 
         images = images.astype(np.float32)/255.0
+        images = self.CIFAR_normalize(images)
         indices = np.arange(images.shape[0])
         np.random.shuffle(indices)
         X, y = images[indices], labels[indices]
         y = to_categorical(y)
     
         return X, y
+    
+    def CIFAR_normalize(self, X):
+        mean = np.array([0.4914, 0.4822, 0.4465]).reshape(1,3,1,1)
+        std  = np.array([0.2470, 0.2435, 0.2616]).reshape(1,3,1,1)
+        x = (X - mean) / std
+        return x 
 
     def getBatchDataForCNN(self,batchList):
         batch = self.batchNames[batchList[0]]
@@ -282,4 +290,60 @@ class cifar:
         images = (images - 0.5)/0.5
 
         return images
-        
+    
+# Image Augmentation
+    
+   
+    def random_horizontal_flip(self,images, p=0.5):
+        """
+        images: (N, C, H, W)
+        """
+        N = images.shape[0]
+        flipped = images.copy()
+
+        for i in range(N):
+            if np.random.rand() < p:
+                flipped[i] = flipped[i, :, :, ::-1]
+
+        return flipped
+
+    def random_crop(self, images, crop_size=32, padding=4):
+        """
+        images: (N, C, H, W)
+        """
+        N, C, H, W = images.shape
+        padded = np.pad(
+            images,
+            ((0, 0), (0, 0), (padding, padding), (padding, padding)),
+            mode='constant'
+        )
+
+        cropped = np.zeros((N, C, crop_size, crop_size), dtype=images.dtype)
+
+        for i in range(N):
+            y = np.random.randint(0, H + 2 * padding - crop_size + 1)
+            x = np.random.randint(0, W + 2 * padding - crop_size + 1)
+            cropped[i] = padded[i, :, y:y+crop_size, x:x+crop_size]
+
+        return cropped
+    
+    def augment_cifar10(self, images):
+        """
+        images: (N, C, 32, 32)
+        """
+        images = self.random_crop(images, crop_size=32, padding=4)
+        images = self.random_horizontal_flip(images, p=0.5)
+        return images
+    
+    def getManyBatches(self, batchList):
+       
+        for ii in range(len(batchList)):   
+            if ii == 0:
+                outImages,outLabels = self.getBatchDataFromListGPT([batchList[ii]])
+            else:
+                images, labels = self.getBatchDataFromListGPT([batchList[ii]])
+                outImages = np.concatenate((outImages,images), axis=0)
+                outLabels = np.concatenate((outLabels,labels), axis=0)
+                
+        return outImages, outLabels
+            

@@ -12,40 +12,46 @@ import cifar as ci
 
 print ("*-------------------------------CNN-CIFAR---------------------------------------------------*/")
 
-lr = 0.0015
-batchSize = 64
-epochs = 3 
-dropOutRate = 0.1
-batchList = [[3]]          
-loadParams = True
-
 cifarInst = ci.cifar()
-CNNManager = cnn.Control(batchSize, lr , epochs, dropOutRate)
+images, labels = cifarInst.getManyBatches ([0,1,2,3,4 ])
 
-print (" Start to Train " +  " at " ,datetime.now().time())
 
-for ii in range(len(batchList)):  
-    trainingImages, trainingLabels =cifarInst.getBatchDataFromListGPT(batchList[ii])
-    CNNManager.setTrainingData(trainingImages, trainingLabels)
+lr = 0.001
+batchSize = 64
+epochs = 1
+dropOutRate = 0.0
+weightDecay = 5e-4
+loadSaved = False
+gapInUse = True
+
+CNNManager = cnn.Control(batchSize, lr , epochs, dropOutRate, weightDecay, gapInUse)
+CNNManager.setAugmentation(True)
+CNNManager.setTrainingData(images,labels)
+
+if loadSaved == True:
+    CNNManager.load_params()
+else:
+    CNNManager.init()
     
-    if  loadParams == True:
-        CNNManager.load_params()
-        CNNManager.setLearningRate(lr)
-        loadParams = False
-    else:
-        if ii == 0:   
-            CNNManager.init()
-            
-    CNNManager.run()
-    
-CNNManager.save_params_by_name("model.pkl")
-print (" End of Training " +  " at " ,datetime.now().time())
+CNNManager.printMessage (" Started to Train at ")
+CNNManager.run()
+CNNManager.printMessage (" Finished Training at ") 
 
-"""""
 runningCost = CNNManager.getCost()
+
+
+CNNManager.save_params_by_name("model.pkl")
+
+CNNManager.testTraining()
+CNNManager.printMessage (" Finished Test Training at ")
+print (" Start to Test at " ,datetime.now().time())
+testImages, testLabels =cifarInst.getTestBatchForGPT()
+CNNManager.test(testImages,testLabels)
+
+print (" Finished Testing at " ,datetime.now().time())
+
 plt.plot(runningCost)
 plt.xlabel("Iterations")
 plt.ylabel( "Error for all training instances")
+plt.savefig("runningCost.png")
 plt.show()
-plt.savefig("runningCost.png")  
-"""""
