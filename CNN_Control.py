@@ -34,6 +34,7 @@ class Control:
         #   32 → 32 → pool
         #   64 → 64 → pool
         
+        """""
         self.conv_spec_list = [
             {'filter_size': 3, 'in_ch': 3, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
             'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
@@ -53,7 +54,14 @@ class Control:
         #self.dense_channels = [256, 10]  
         # for GAP there is only the "10" layer.
         self.dense_channels = [10]
+       """   
+
+    def setDenseChannels(self, channels):
+        self.dense_channels = channels
         
+    def setConvLayers(self, layers):
+        self.conv_spec_list = layers
+                                    
     def setTrainingData(self, X,Y):
         self.X = X
         self.Y = Y

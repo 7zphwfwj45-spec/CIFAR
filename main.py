@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 import sys
 from datetime import datetime
 sys.path.append("/Volumes/MyDrive/sharedPythonFiles")
-import NeuralNetDefinition as nt          
-import MatrixScaling as ms
 import CNN_Control as cnn
 
 import cifar as ci
@@ -23,10 +21,30 @@ dropOutRate = 0.0
 weightDecay = 5e-4
 loadSaved = False
 gapInUse = True
+convLayers = [
+            {'filter_size': 3, 'in_ch': 3, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
+            {'filter_size': 3, 'in_ch': 32, 'out_ch': 32, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
+            {'filter_size': 3, 'in_ch': 32, 'out_ch': 64, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
+            {'filter_size': 3, 'in_ch': 64, 'out_ch': 64, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}},
+            {'filter_size': 3, 'in_ch': 64, 'out_ch': 128, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 0, 'pool_width': 0, 'stride': 0}},
+            {'filter_size': 3, 'in_ch': 128, 'out_ch': 128, 'stride': 1, 'pad': 1, 'use_bn': True,
+            'pool_param': {'pool_height': 2, 'pool_width': 2, 'stride': 2}}
+
+        ]
+denseChannels =  [10]
+
 
 CNNManager = cnn.Control(batchSize, lr , epochs, dropOutRate, weightDecay, gapInUse)
 CNNManager.setAugmentation(True)
 CNNManager.setTrainingData(images,labels)
+CNNManager.setConvLayers(convLayers)
+CNNManager.setDenseChannels(denseChannels)
+
 
 if loadSaved == True:
     CNNManager.load_params()
